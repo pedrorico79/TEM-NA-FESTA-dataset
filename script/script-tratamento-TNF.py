@@ -73,7 +73,24 @@ mapa_busca = {
     "Chocolate em pó": "achocolatado"
 }
 
+# Identificador fixo de cada produto no dataset
+mapa_id_produto = {
+    "Pão doce": 1,
+    "Bolos": 2,
+    "Biscoito doce": 3,
+    "Rosca doce": 4,
+    "Bombom": 5,
+    "Chocolate em tablete": 6,
+    "Doce a base de leite": 7,
+    "Sorvete": 8,
+    "Gelatina": 9,
+    "Chocolate em pó": 10,
+}
+
 # Realiza o mapeamento usando os nomes já limpos
+df_doces_sp["produto_id"] = (
+    df_doces_sp["produto_ibge"].map(mapa_id_produto).astype("Int64")
+)
 df_doces_sp["termo_trends"] = df_doces_sp["produto_ibge"].map(mapa_busca).fillna(df_doces_sp["produto_ibge"])
 
 # ---------------------------------------------------------
@@ -199,8 +216,11 @@ df_doces_sp["tipo_feriado_pico"] = "Sazonalidade Comercial"
 # ---------------------------------------------------------
 # 5. ORDENAÇÃO E EXIBIÇÃO DA BASE FINAL
 # ---------------------------------------------------------
+# Registra a data em que os dados foram coletados
+df_doces_sp["data_coleta"] = pd.Timestamp.now(tz="America/Sao_Paulo").strftime("%Y-%m-%d")
+
 colunas_finais = (
-    ["produto_ibge", "termo_trends", "consumo_kg_sp"]
+    ["produto_id", "produto_ibge", "termo_trends", "consumo_kg_sp", "data_coleta"]
     + colunas_meses
     + [
         "popularidade_media",
