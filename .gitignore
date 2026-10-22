@@ -2,6 +2,7 @@
 venv/
 __pycache__/
 *.py[cod]
+.env
 
 /arquivos-gerados/*
 !/arquivos-gerados/.gitkeep

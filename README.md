@@ -10,6 +10,8 @@ dos últimos 12 meses no Google Trends.
 - Pandas para leitura, limpeza e transformação dos dados
 - PyTrends para consulta ao Google Trends
 - xlrd para leitura da planilha `.xls` do IBGE
+- Requests para consumir a API do sistema
+- python-dotenv para carregar a configuração local
 
 ## Estrutura do projeto
 
@@ -19,9 +21,11 @@ dos últimos 12 meses no Google Trends.
 │   ├── aquisicao_alimentar_por_unidade_da_federacao.xls
 │   └── feriados_nacionais_2026.csv
 ├── script/
-│   └── script-tratamento-TNF.py
+│   ├── script-tratamento-TNF.py
+│   └── script-tendencias-produtos-TNF.py
 ├── arquivos-gerados/
 │   └── .gitkeep
+├── .env.example
 ├── .gitignore
 └── README.md
 ```
@@ -56,7 +60,7 @@ source .venv/Scripts/activate
 ### 3. Instalar as dependências
 
 ```bash
-python -m pip install pandas pytrends xlrd
+python -m pip install pandas pytrends xlrd requests python-dotenv
 ```
 
 ### 4. Executar o script
@@ -71,6 +75,33 @@ final, o seguinte arquivo será criado ou atualizado:
 ```text
 arquivos-gerados/produtos_confeitaria_popularidade_mensal.csv
 ```
+
+## Coleta dos produtos cadastrados no sistema
+
+O segundo script consulta os produtos ativos do backend e utiliza diretamente o
+nome cadastrado como termo de pesquisa no Google Trends.
+
+Copie `.env.example` para `.env` e preencha a URL e as credenciais locais. O
+arquivo `.env` contém informações sensíveis e é ignorado pelo Git.
+
+Com o backend em execução, rode:
+
+```bash
+python ./script/script-tendencias-produtos-TNF.py
+```
+
+O resultado será salvo em:
+
+```text
+arquivos-gerados/tendencias_produtos_sistema.csv
+```
+
+Produtos inativos não são coletados. Um produto sem retorno no Google Trends é
+registrado no log e ignorado, permitindo que os demais sejam processados. O log
+da execução fica em `arquivos-gerados/pipeline-tendencias.log`.
+
+O novo CSV possui exatamente 12 colunas mensais: o mês atual, ainda parcial, e
+os 11 meses anteriores.
 
 ## Dados gerados
 
