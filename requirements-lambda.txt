@@ -1,0 +1,10 @@
+# Dependências do pacote das Lambdas, instaladas com pip --no-deps pelo
+# scripts/build-dataset-lambda.sh da infraestrutura. pandas, numpy e boto3 já
+# vêm no layer AWS SDK for pandas e no runtime; o pytrends não usa o lxml.
+pytrends==4.9.2
+requests==2.32.3
+urllib3==2.2.3
+idna==3.10
+charset-normalizer==3.4.0
+certifi==2024.8.30
+xlrd==2.0.1

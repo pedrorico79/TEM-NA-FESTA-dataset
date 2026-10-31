@@ -1,0 +1,9 @@
+# Execução local e testes.
+pandas
+pytrends
+xlrd
+openpyxl
+requests
+python-dotenv
+boto3
+pytest
