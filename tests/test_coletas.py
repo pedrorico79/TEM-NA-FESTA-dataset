@@ -177,12 +177,16 @@ class SessaoFalsa:
     def __init__(self, produtos=None, status_login=200):
         self.produtos = produtos
         self.status_login = status_login
+        self.urls = []
 
     def post(self, url, json, timeout):
         assert url.endswith("/auth/login")
         return Resposta(status=self.status_login)
 
     def get(self, url, timeout):
+        self.urls.append(url)
+        if callable(self.produtos):
+            return Resposta(self.produtos(url))
         return Resposta(self.produtos)
 
 
@@ -219,6 +223,30 @@ def test_api_fora_do_ar_bloqueia_sem_gravar_e_sem_vazar_a_senha(tmp_path):
             assert b"senha-secreta" not in arquivo.read_bytes()
     assert "senha-secreta" not in json.dumps(resultado)
 
+
+
+def test_produtos_paginados_da_api_sao_lidos_em_todas_as_paginas(tmp_path):
+    def paginas(url):
+        if url.endswith("page=0"):
+            return {"content": PRODUTOS[:1], "last": False}
+        return {"content": PRODUTOS[1:], "last": True}
+
+    sessao = SessaoFalsa(paginas)
+    resultado = tendencias.coletar(
+        Destino(tmp_path), "http://alb/api/v1", "e", "s", "dev",
+        cliente=TrendsFalso(), dormir=nunca_dorme, sessao=sessao,
+    )
+    assert resultado["status"] == "ok" and resultado["produtos"] == 2
+    assert [u.rsplit("page=", 1)[1] for u in sessao.urls] == ["0", "1"]
+    assert all("ativos=true" in u for u in sessao.urls)
+
+
+def test_resposta_da_api_sem_lista_bloqueia_pela_regra_estrutural(tmp_path):
+    resultado = tendencias.coletar(
+        Destino(tmp_path), "http://alb/api/v1", "e", "s", "dev",
+        cliente=TrendsFalso(), dormir=nunca_dorme, sessao=SessaoFalsa({"erro": "x"}),
+    )
+    assert resultado["status"] == "falha" and "[estrutural]" in resultado["motivo"]
 
 def test_produto_repetido_na_api_bloqueia(tmp_path):
     repetidos = PRODUTOS[:2] + [{"id": 2, "nome": "Outro", "precoVenda": 1, "ativo": True}]

@@ -25,10 +25,33 @@ import tnf_comum as comum  # noqa: E402
 BASE = "tendencias_produtos"
 ARQUIVO_BRUTO = "tendencias_produtos_sistema.csv"
 TIMEOUT_API = 30
+TAMANHO_PAGINA = 100
+MAXIMO_PAGINAS = 50
 QUANTIDADE_MESES = 12
 COLUNAS_INICIAIS = ["produto_id", "produto_nome", "preco_venda", "data_coleta"]
 
 logger = logging.getLogger("tnf_dataset")
+
+
+def listar_produtos(sessao, url):
+    """GET /produtos?ativos=true, página a página. A API devolve um Page do
+    Spring ({"content": [...], "last": ...}); uma lista simples também é aceita.
+    Qualquer outro formato devolve None, que a regra estrutural rejeita."""
+    produtos = []
+    for pagina in range(MAXIMO_PAGINAS):
+        resposta = sessao.get(
+            f"{url}/produtos?ativos=true&size={TAMANHO_PAGINA}&page={pagina}", timeout=TIMEOUT_API
+        )
+        resposta.raise_for_status()
+        dados = resposta.json()
+        if isinstance(dados, list):
+            return dados
+        if not isinstance(dados, dict) or not isinstance(dados.get("content"), list):
+            return None
+        produtos.extend(dados["content"])
+        if dados.get("last", True) or not dados["content"]:
+            break
+    return produtos
 
 
 def buscar_produtos_ativos(url, email, senha, rejeicoes, sessao=None):
@@ -43,9 +66,7 @@ def buscar_produtos_ativos(url, email, senha, rejeicoes, sessao=None):
             timeout=TIMEOUT_API,
         )
         login.raise_for_status()
-        resposta = sessao.get(f"{url}/produtos", timeout=TIMEOUT_API)
-        resposta.raise_for_status()
-        produtos = resposta.json()
+        produtos = listar_produtos(sessao, url)
     except Exception as erro:
         # A mensagem do requests traz só a URL, nunca o corpo do login.
         rejeicoes.bloquear("coleta externa", f"falha ao consultar a API de produtos: {erro.__class__.__name__}: {erro}")
