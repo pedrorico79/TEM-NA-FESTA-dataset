@@ -60,7 +60,7 @@ source .venv/Scripts/activate
 ### 3. Instalar as dependências
 
 ```bash
-python -m pip install pandas pytrends xlrd requests python-dotenv
+python -m pip install -r requirements-dev.txt
 ```
 
 ### 4. Executar o script
@@ -126,3 +126,35 @@ tentativas com intervalos progressivos.
 Se todas as tentativas falharem, a execução é interrompida e o CSV existente não
 é substituído por um resultado incompleto. Aguarde alguns minutos antes de tentar
 novamente.
+
+## Validação e rejeições
+
+As duas coletas aplicam as regras de validação da "Especificação de Base de
+Dados" (seção 4.2): estrutural, identificação, domínio, integridade, temporal,
+mapeamento, negócio e coleta externa. Na base da POF todas são bloqueantes: se
+uma falhar, nada é gravado e o CSV anterior fica intacto. Na base dos produtos
+do sistema, um produto sem dados no Google Trends não bloqueia; ele vai para as
+rejeições como aviso. Cada execução grava também o arquivo de rejeições
+(`rejeicoes.jsonl`), com produto, regra, motivo, severidade e data.
+
+Além do CSV de antes, a execução grava em `arquivos-gerados/datasets/` o mesmo
+layout usado na AWS: o arquivo bruto, o resumo e a série mensal em JSON Lines,
+sob a partição `data_coleta=AAAA-MM-DD`.
+
+## Execução na AWS (Lambda)
+
+A lógica fica nos módulos `script/tnf_pof_trends.py` e `script/tnf_tendencias.py`,
+cada um com o `main()` da execução local e um `handler(event, context)` para a
+Lambda. A infraestrutura (`TEM-NA-FESTA-infraestrutura`, spec 10) empacota este
+repositório numa tag fixa, com as dependências de `requirements-lambda.txt`, e
+grava as coletas no bucket bronze. Na Lambda, a URL da API vem de variável de
+ambiente e o email e a senha vêm do SSM, nunca de `.env`.
+
+## Testes
+
+```bash
+python -m pytest tests
+```
+
+Os testes não usam a rede: o Google Trends e a API são simulados, e a planilha
+da POF é a de `bases-externas/`.
