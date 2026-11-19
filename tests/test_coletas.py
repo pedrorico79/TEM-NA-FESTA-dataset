@@ -24,19 +24,21 @@ class TrendsFalso:
         self.termo = None
 
     def build_payload(self, termos, **_):
-        self.termo = termos[0]
-        self.consultas.append(self.termo)
+        self.termos = list(termos)
+        self.termo = self.termos[0]
+        self.consultas.append(self.termos)
 
     def interest_over_time(self):
         if self.erro:
             raise self.erro
-        if self.termo in self.sem_dados:
-            return pd.DataFrame()
         fim = pd.Timestamp.now(tz=comum.FUSO).tz_localize(None).normalize()
         semanas = pd.date_range(end=fim, periods=52, freq="W-SUN")
-        base = self.valores.get(self.termo, 50)
-        serie = [min(100, base + (i % 12) * 3) for i in range(len(semanas))]
-        return pd.DataFrame({self.termo: serie, "isPartial": False}, index=semanas)
+        dados = {}
+        for termo in self.termos:
+            base = 0 if termo in self.sem_dados else self.valores.get(termo, 50)
+            dados[termo] = [min(100, base + (i % 12) * 3) if base else 0 for i in range(len(semanas))]
+        dados["isPartial"] = False
+        return pd.DataFrame(dados, index=semanas)
 
 
 class Destino(comum.DestinoLocal):
@@ -103,12 +105,18 @@ def test_produtos_do_sistema_produto_sem_dados_vira_aviso_e_os_demais_seguem(tmp
         Destino(tmp_path), "http://alb/api/v1", "coleta@exemplo.com", "s", "dev",
         cliente=TrendsFalso(sem_dados={"Brigadeiro"}), dormir=nunca_dorme, sessao=SessaoFalsa(PRODUTOS),
     )
-    assert resultado["status"] == "ok" and resultado["produtos"] == 1
+    assert resultado["status"] == "ok" and resultado["produtos_com_dados"] == 2
+    assert resultado["produtos_catalogo"] == 3
+    assert resultado["produtos_ativos"] == 2 and resultado["produtos_inativos"] == 1
     particao = f"env=dev/data_coleta={comum.hoje()}"
     rejeicoes = ler_jsonl(tmp_path / f"datasets/tendencias_produtos/rejeicoes/{particao}/rejeicoes.jsonl")
     assert rejeicoes[0]["produto"] == "Brigadeiro" and rejeicoes[0]["severidade"] == "aviso"
     resumo = ler_jsonl(tmp_path / f"datasets/tendencias_produtos/resumo/{particao}/resumo.jsonl")
-    assert resumo[0]["produto_nome"] == "Bolo de pote" and resumo[0]["preco_venda"] == 12.5
+    por_nome = {r["produto_nome"]: r for r in resumo}
+    assert por_nome["Bolo de pote"]["preco_venda"] == 12.5
+    assert por_nome["Produto inativo"]["produto_ativo"] is False
+    catalogo = ler_jsonl(tmp_path / f"datasets/tendencias_produtos/catalogo/{particao}/catalogo.jsonl")
+    assert len(catalogo) == 3 and sum(not r["produto_ativo"] for r in catalogo) == 1
 
 
 def test_api_fora_do_ar_bloqueia_sem_gravar_e_sem_vazar_a_senha(tmp_path):
@@ -137,9 +145,9 @@ def test_produtos_paginados_da_api_sao_lidos_em_todas_as_paginas(tmp_path):
         Destino(tmp_path), "http://alb/api/v1", "e", "s", "dev",
         cliente=TrendsFalso(), dormir=nunca_dorme, sessao=sessao,
     )
-    assert resultado["status"] == "ok" and resultado["produtos"] == 2
+    assert resultado["status"] == "ok" and resultado["produtos_com_dados"] == 3
     assert [u.rsplit("page=", 1)[1] for u in sessao.urls] == ["0", "1"]
-    assert all("ativos=true" in u for u in sessao.urls)
+    assert all("ativos=" not in u for u in sessao.urls)
 
 
 def test_resposta_da_api_sem_lista_bloqueia_pela_regra_estrutural(tmp_path):

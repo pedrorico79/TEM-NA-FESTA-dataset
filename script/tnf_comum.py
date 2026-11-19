@@ -149,6 +149,36 @@ def serie_mensal(cliente, termo, prazo, rejeicoes, dormir=time.sleep):
     return None
 
 
+def series_mensais_lote(cliente, termos, prazo, rejeicoes, dormir=time.sleep):
+    """Consulta até cinco termos juntos e devolve índices mensais comparáveis.
+
+    O Google Trends normaliza todos os termos da mesma requisição pela mesma
+    escala. O coletor inclui uma referência comum em cada lote e calcula a
+    razão produto/referência para permitir comparação aproximada entre lotes.
+    """
+    termos = list(dict.fromkeys(termos))
+    if not termos or len(termos) > 5:
+        rejeicoes.bloquear("estrutural", "lote do Google Trends precisa ter de 1 a 5 termos")
+    for tentativa in range(1, MAX_TENTATIVAS + 1):
+        prazo.garantir(rejeicoes, 0)
+        try:
+            cliente.build_payload(termos, cat=0, timeframe="today 12-m", geo="BR-SP")
+            dados = cliente.interest_over_time()
+            ausentes = [termo for termo in termos if termo not in dados.columns]
+            if dados.empty or ausentes:
+                raise ValueError("o Google Trends não retornou todos os termos do lote")
+            return dados[termos].resample("MS").mean().round(2)
+        except ColetaInterrompida:
+            raise
+        except Exception as erro:
+            logger.warning("Tentativa %s de %s falhou para lote de %s termos: %s", tentativa, MAX_TENTATIVAS, len(termos), erro)
+            if tentativa < MAX_TENTATIVAS:
+                espera = ESPERA_BASE_NOVA_TENTATIVA * tentativa
+                prazo.garantir(rejeicoes, espera)
+                dormir(espera)
+    return None
+
+
 def colunas_de_meses(df):
     return [c for c in df.columns if isinstance(c, str) and len(c) == 7 and c[4] == "-" and c[:4].isdigit()]
 
@@ -227,8 +257,11 @@ def registros_serie(df, colunas_meses, data_coleta):
             serie.append(
                 {
                     "produto_id": linha["produto_id"],
+                    "produto_ativo": bool(linha["produto_ativo"]),
+                    "termo_referencia": linha["termo_referencia"],
                     "mes_referencia": mes,
                     "popularidade": linha[mes],
+                    "interesse_relativo_referencia": linha[f"ref_{mes}"],
                     "mes_parcial": mes == atual,
                     "data_coleta": data_coleta,
                 }
@@ -278,7 +311,9 @@ class DestinoS3:
 def gravar_coleta(destino, base, particao, arquivos):
     """Grava os arquivos de uma coleta bem-sucedida. arquivos: {tipo: (nome, bytes)}."""
     chaves = []
-    for tipo in ("bruto", "resumo", "serie"):
+    for tipo in ("bruto", "resumo", "serie", "catalogo"):
+        if tipo not in arquivos:
+            continue
         nome, conteudo = arquivos[tipo]
         chaves.append(destino.gravar(f"datasets/{base}/{tipo}/{particao}/{nome}", conteudo))
     return chaves

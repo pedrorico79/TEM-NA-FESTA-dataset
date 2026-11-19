@@ -1,5 +1,4 @@
-"""Base dos produtos cadastrados no sistema: o nome de cada produto ativo
-como termo do Google Trends.
+"""Catálogo de produtos ativos e inativos do sistema como termos do Google Trends.
 
 Execução local: python ./script/script-tendencias-produtos-TNF.py, com a URL e o
 login da API no .env (grava em arquivos-gerados/). Na AWS: a Lambda do ambiente,
@@ -28,19 +27,23 @@ TIMEOUT_API = 30
 TAMANHO_PAGINA = 100
 MAXIMO_PAGINAS = 50
 QUANTIDADE_MESES = 12
-COLUNAS_INICIAIS = ["produto_id", "produto_nome", "preco_venda", "data_coleta"]
+COLUNAS_INICIAIS = ["produto_id", "produto_nome", "produto_ativo", "preco_venda", "termo_referencia", "data_coleta"]
+METRICAS_COMPARAVEIS = ["interesse_relativo_referencia_media", "interesse_relativo_referencia_pico"]
+TAMANHO_LOTE = 4
+TERMO_REFERENCIA_PADRAO = "Bolo de Chocolate"
 
 logger = logging.getLogger("tnf_dataset")
 
 
 def listar_produtos(sessao, url):
-    """GET /produtos?ativos=true, página a página. A API devolve um Page do
+    """GET /produtos sem filtro de ativos: inclui ativos e inativos e a API
+    já exclui os produtos deletados logicamente. A API devolve um Page do
     Spring ({"content": [...], "last": ...}); uma lista simples também é aceita.
     Qualquer outro formato devolve None, que a regra estrutural rejeita."""
     produtos = []
     for pagina in range(MAXIMO_PAGINAS):
         resposta = sessao.get(
-            f"{url}/produtos?ativos=true&size={TAMANHO_PAGINA}&page={pagina}", timeout=TIMEOUT_API
+            f"{url}/produtos?size={TAMANHO_PAGINA}&page={pagina}", timeout=TIMEOUT_API
         )
         resposta.raise_for_status()
         dados = resposta.json()
@@ -54,8 +57,8 @@ def listar_produtos(sessao, url):
     return produtos
 
 
-def buscar_produtos_ativos(url, email, senha, rejeicoes, sessao=None):
-    """Login e GET /produtos; só os ativos, com id e nome."""
+def buscar_produtos_catalogo(url, email, senha, rejeicoes, sessao=None):
+    """Login e GET /produtos; inclui ativos e inativos não deletados."""
     import requests
 
     sessao = sessao or requests.Session()
@@ -76,23 +79,31 @@ def buscar_produtos_ativos(url, email, senha, rejeicoes, sessao=None):
 
     validos = []
     for produto in produtos:
-        if not isinstance(produto, dict) or not produto.get("ativo", False):
+        if not isinstance(produto, dict):
             continue
         nome = str(produto.get("nome") or "").strip()
         if produto.get("id") is None or not nome:
-            rejeicoes.registrar("integridade", "produto ativo sem id ou sem nome", produto.get("id"), nome or None, "aviso")
+            rejeicoes.registrar("integridade", "produto do catálogo sem id ou sem nome", produto.get("id"), nome or None, "aviso")
             continue
-        validos.append({"produto_id": produto["id"], "produto_nome": nome, "preco_venda": produto.get("precoVenda")})
+        if not isinstance(produto.get("ativo"), bool):
+            rejeicoes.bloquear("integridade", "produto do catálogo sem status ativo válido", produto.get("id"), nome)
+        validos.append({
+            "produto_id": produto["id"],
+            "produto_nome": nome,
+            "produto_ativo": produto["ativo"],
+            "preco_venda": produto.get("precoVenda"),
+        })
 
     if not validos:
-        rejeicoes.bloquear("integridade", "a API não retornou produtos ativos válidos")
+        rejeicoes.bloquear("integridade", "a API não retornou produtos válidos no catálogo")
 
     df = pd.DataFrame(validos)
     df["produto_id"] = pd.to_numeric(df["produto_id"], errors="coerce").astype("Int64")
     df["preco_venda"] = pd.to_numeric(df["preco_venda"], errors="coerce")
     if df["produto_id"].isna().any() or df["produto_id"].duplicated().any():
         rejeicoes.bloquear("identificação", "a API retornou produto_id inválido ou repetido")
-    logger.info("%s produtos ativos obtidos da API.", len(df))
+    ativos = int(df["produto_ativo"].sum())
+    logger.info("[api_produtos] %s produtos obtidos da API: %s ativos e %s inativos.", len(df), ativos, len(df) - ativos)
     return df
 
 
@@ -107,66 +118,108 @@ def coletar(destino, url, email, senha, ambiente, prazo=None, cliente=None, dorm
     particao = f"env={ambiente}/data_coleta={data_coleta}"
     rejeicoes = comum.Rejeicoes(data_coleta)
     try:
-        produtos = buscar_produtos_ativos(url, email, senha, rejeicoes, sessao)
+        logger.info("[coleta] início da coleta do catálogo de produtos.")
+        produtos = buscar_produtos_catalogo(url, email, senha, rejeicoes, sessao)
         cliente = cliente or comum.cliente_trends()
         meses_esperados = ultimos_meses()
 
-        series = []
+        series = {}
+        series_referencia = {}
         nomes = produtos["produto_nome"].drop_duplicates().tolist()
-        for indice, nome in enumerate(nomes):
-            linha = produtos[produtos["produto_nome"] == nome].iloc[0]
-            serie = comum.serie_mensal(cliente, nome, prazo, rejeicoes, dormir)
-            if serie is not None:
-                serie = serie.reindex(meses_esperados)
-            if serie is None or serie.dropna().empty or (serie.fillna(0) == 0).all():
-                rejeicoes.registrar(
-                    "coleta externa",
-                    "Sem dados suficientes no Google Trends nos últimos 12 meses",
-                    linha["produto_id"],
-                    nome,
-                    "aviso",
-                )
+        termo_referencia = os.getenv("TNF_TRENDS_REFERENCIA", TERMO_REFERENCIA_PADRAO).strip()
+        if not termo_referencia:
+            rejeicoes.bloquear("configuração", "TNF_TRENDS_REFERENCIA não pode ser vazio")
+        lotes = [nomes[i:i + TAMANHO_LOTE] for i in range(0, len(nomes), TAMANHO_LOTE)]
+
+        for indice_lote, nomes_lote in enumerate(lotes):
+            correspondente = next((n for n in nomes_lote if n.casefold() == termo_referencia.casefold()), None)
+            referencia_lote = correspondente or termo_referencia
+            termos_lote = [referencia_lote] + [n for n in nomes_lote if n.casefold() != termo_referencia.casefold()]
+            logger.info("[google_trends] consultando lote %s/%s, referência '%s', %s produtos.", indice_lote + 1, len(lotes), referencia_lote, len(nomes_lote))
+            dados_lote = comum.series_mensais_lote(cliente, termos_lote, prazo, rejeicoes, dormir)
+            if dados_lote is None:
+                for nome in nomes_lote:
+                    linha = produtos[produtos["produto_nome"] == nome].iloc[0]
+                    rejeicoes.registrar("coleta externa", "Lote sem dados suficientes no Google Trends", linha["produto_id"], nome, "aviso")
             else:
-                serie.name = nome
-                series.append(serie)
-            if indice < len(nomes) - 1:
+                if referencia_lote not in dados_lote.columns:
+                    rejeicoes.bloquear("estrutural", "o Google Trends não retornou a referência comum do lote")
+                dados_lote = dados_lote.reindex(meses_esperados)
+                serie_ref = dados_lote[referencia_lote].astype("float64")
+                for nome in nomes_lote:
+                    termo_consultado = referencia_lote if nome.casefold() == termo_referencia.casefold() else nome
+                    serie = dados_lote[termo_consultado].astype("float64")
+                    if serie.dropna().empty or (serie.fillna(0) == 0).all():
+                        linha = produtos[produtos["produto_nome"] == nome].iloc[0]
+                        rejeicoes.registrar(
+                            "coleta externa",
+                            "Sem dados suficientes no Google Trends nos últimos 12 meses",
+                            linha["produto_id"],
+                            nome,
+                            "aviso",
+                        )
+                    else:
+                        series[nome] = serie
+                        series_referencia[nome] = (serie.div(serie_ref.where(serie_ref > 0)).mul(100)).round(2)
+            if indice_lote < len(lotes) - 1:
                 prazo.garantir(rejeicoes, comum.INTERVALO_ENTRE_CONSULTAS)
                 dormir(comum.INTERVALO_ENTRE_CONSULTAS)
 
         if not series:
             rejeicoes.bloquear("coleta externa", "nenhum produto retornou dados válidos do Google Trends")
 
-        trends = pd.concat(series, axis=1).T
+        trends = pd.DataFrame.from_dict(series, orient="index")
         trends.columns = [c.strftime("%Y-%m") for c in trends.columns]
         meses = list(trends.columns)
+        trends.index.name = "produto_nome"
+        trends = trends.reset_index()
+        relativo = pd.DataFrame.from_dict(series_referencia, orient="index")
+        relativo.columns = [f"ref_{c.strftime('%Y-%m')}" for c in relativo.columns]
+        relativo.index.name = "produto_nome"
+        relativo = relativo.reset_index()
+        trends = trends.merge(relativo, on="produto_nome", how="left")
         comum.validar_meses(meses, rejeicoes)
-        trends = trends.reset_index().rename(columns={"index": "produto_nome"})
         df = produtos.merge(trends, on="produto_nome", how="inner")
         comum.validar_dominio_trends(df, meses, rejeicoes, "produto_nome")
 
+        colunas_referencia = [f"ref_{m}" for m in meses]
         df = comum.calcular_metricas(df, meses)
+        df["termo_referencia"] = termo_referencia
+        df["interesse_relativo_referencia_media"] = df[colunas_referencia].mean(axis=1).round(2)
+        df["interesse_relativo_referencia_pico"] = df[colunas_referencia].max(axis=1).round(2)
         df["data_coleta"] = data_coleta
-        final = df[COLUNAS_INICIAIS + meses + comum.METRICAS].sort_values("fator_sazonalidade", ascending=False)
-        resumo = final[COLUNAS_INICIAIS + comum.METRICAS].to_dict("records")
+        metricas_saida = comum.METRICAS + METRICAS_COMPARAVEIS
+        final = df[COLUNAS_INICIAIS + meses + colunas_referencia + metricas_saida].sort_values("interesse_relativo_referencia_media", ascending=False)
+        resumo = final[COLUNAS_INICIAIS + metricas_saida].to_dict("records")
+        catalogo = produtos.copy()
+        catalogo["data_coleta"] = data_coleta
         arquivos = {
             "bruto": (ARQUIVO_BRUTO, comum.csv_bruto(final)),
             "resumo": ("resumo.jsonl", comum.jsonl(resumo)),
             "serie": ("serie.jsonl", comum.jsonl(comum.registros_serie(final, meses, data_coleta))),
+            "catalogo": ("catalogo.jsonl", comum.jsonl(catalogo.to_dict("records"))),
         }
         chaves = comum.gravar_coleta(destino, BASE, particao, arquivos)
         chaves.append(comum.gravar_rejeicoes(destino, BASE, particao, rejeicoes))
-        return {
+        resultado = {
             "status": "ok",
             "base": BASE,
             "ambiente": ambiente,
             "data_coleta": data_coleta,
-            "produtos": len(final),
+            "produtos_catalogo": len(produtos),
+            "produtos_ativos": int(produtos["produto_ativo"].sum()),
+            "produtos_inativos": int((~produtos["produto_ativo"]).sum()),
+            "produtos_com_dados": len(final),
+            "lotes_consultados": len(lotes),
+            "termo_referencia": termo_referencia,
             "rejeicoes": len(rejeicoes.linhas),
             "chaves": chaves,
         }
+        logger.info("[resultado] %s", resultado)
+        return resultado
     except comum.ColetaInterrompida as erro:
         chave = comum.gravar_rejeicoes(destino, BASE, particao, rejeicoes)
-        return {
+        resultado = {
             "status": "falha",
             "base": BASE,
             "ambiente": ambiente,
@@ -175,6 +228,8 @@ def coletar(destino, url, email, senha, ambiente, prazo=None, cliente=None, dorm
             "rejeicoes": len(rejeicoes.linhas),
             "chaves": [chave],
         }
+        logger.error("[resultado] %s", resultado)
+        return resultado
 
 
 def handler(event, context):
@@ -210,20 +265,91 @@ def main():
     if faltando:
         print("Variáveis de ambiente não configuradas: " + ", ".join(faltando))
         raise SystemExit(1)
+    import csv
     pasta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "arquivos-gerados")
-    resultado = coletar(
-        comum.DestinoLocal(pasta),
-        os.environ["TNF_API_URL"].rstrip("/"),
-        os.environ["TNF_API_EMAIL"],
-        os.environ["TNF_API_PASSWORD"],
-        os.getenv("TNF_ENV", "local"),
-    )
+    ambiente = os.getenv("TNF_ENV", "local")
+    inicio = pd.Timestamp.now(tz=comum.FUSO)
+    eventos = []
+
+    class CapturaLogs(logging.Handler):
+        def emit(self, registro):
+            instante = pd.Timestamp(registro.created, unit="s", tz="UTC").tz_convert(comum.FUSO)
+            mensagem = registro.getMessage()
+            etapa = mensagem[1:].split("]", 1)[0] if mensagem.startswith("[") and "]" in mensagem else "geral"
+            eventos.append({
+                "timestamp": instante.isoformat(timespec="seconds"),
+                "ambiente": ambiente,
+                "execucao_id": execucao_id,
+                "nivel": registro.levelname,
+                "etapa": etapa,
+                "mensagem": mensagem,
+            })
+
+    execucao_id = f"{ambiente}-{inicio.strftime('%Y%m%dT%H%M%S%z')}"
+    captura = CapturaLogs()
+    logger.addHandler(captura)
+    try:
+        resultado = coletar(
+            comum.DestinoLocal(pasta),
+            os.environ["TNF_API_URL"].rstrip("/"),
+            os.environ["TNF_API_EMAIL"],
+            os.environ["TNF_API_PASSWORD"],
+            ambiente,
+        )
+    except Exception as erro:
+        # Registra só o tipo da exceção; evita incluir detalhes sensíveis na saída.
+        logger.error("[execucao] falha inesperada: %s", erro.__class__.__name__)
+        resultado = {
+            "status": "falha",
+            "data_coleta": comum.hoje(),
+            "motivo": erro.__class__.__name__,
+            "rejeicoes": 0,
+        }
+    finally:
+        logger.removeHandler(captura)
+    fim = pd.Timestamp.now(tz=comum.FUSO)
+    monitoramento = os.path.join(pasta, "monitoramento")
+    os.makedirs(monitoramento, exist_ok=True)
+    resumo = {
+        "execucao_id": execucao_id,
+        "inicio": inicio.isoformat(timespec="seconds"),
+        "fim": fim.isoformat(timespec="seconds"),
+        "ambiente": ambiente,
+        "data_coleta": resultado.get("data_coleta"),
+        "status": resultado.get("status"),
+        "produtos_catalogo": resultado.get("produtos_catalogo"),
+        "produtos_ativos": resultado.get("produtos_ativos"),
+        "produtos_inativos": resultado.get("produtos_inativos"),
+        "produtos_com_dados": resultado.get("produtos_com_dados"),
+        "rejeicoes": resultado.get("rejeicoes"),
+        "duracao_segundos": round((fim - inicio).total_seconds(), 2),
+        "motivo": resultado.get("motivo", ""),
+    }
+
+    def anexar_csv(caminho, campos, linhas):
+        existe = os.path.exists(caminho)
+        with open(caminho, "a", encoding="utf-8-sig", newline="") as arquivo:
+            escritor = csv.DictWriter(arquivo, fieldnames=campos, extrasaction="ignore")
+            if not existe or os.path.getsize(caminho) == 0:
+                escritor.writeheader()
+            escritor.writerows(linhas)
+
+    campos_resumo = list(resumo)
+    campos_eventos = ["timestamp", "ambiente", "execucao_id", "nivel", "etapa", "mensagem"]
+    anexar_csv(os.path.join(monitoramento, "execucoes_coleta.csv"), campos_resumo, [resumo])
+    anexar_csv(os.path.join(monitoramento, "eventos_coleta.csv"), campos_eventos, eventos)
+
     if resultado["status"] != "ok":
         print(f"\n[ERRO] {resultado['motivo']}\nO CSV anterior foi preservado.")
         raise SystemExit(1)
     with open(resultado["chaves"][0], "rb") as origem, open(os.path.join(pasta, ARQUIVO_BRUTO), "wb") as copia:
         copia.write(origem.read())
-    print(f"\n[SUCESSO] {resultado['produtos']} produtos coletados. Arquivo: {os.path.join(pasta, ARQUIVO_BRUTO)}")
+    print(
+        f"\n[SUCESSO] Catálogo: {resultado['produtos_ativos']} ativos + "
+        f"{resultado['produtos_inativos']} inativos; {resultado['produtos_com_dados']} com dados no Trends. "
+        f"Bruto: {os.path.join(pasta, ARQUIVO_BRUTO)}"
+    )
+    print(f"Monitoramento local: {monitoramento}")
 
 
 if __name__ == "__main__":
