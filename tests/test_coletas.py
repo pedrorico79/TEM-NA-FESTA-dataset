@@ -1,18 +1,15 @@
-"""Testes das duas coletas sem rede: Google Trends e API simulados, planilha
-real da POF em bases-externas/. Rodam com: python -m pytest tests"""
+"""Testes da coleta dos produtos do sistema sem rede. Rode com python -m pytest tests."""
 
 import json
 import os
 import sys
 
 import pandas as pd
-import pytest
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(RAIZ, "script"))
 
 import tnf_comum as comum  # noqa: E402
-import tnf_pof_trends as pof  # noqa: E402
 import tnf_tendencias as tendencias  # noqa: E402
 
 
@@ -59,102 +56,6 @@ def nunca_dorme(_):
 def ler_jsonl(caminho):
     with open(caminho, encoding="utf-8") as arquivo:
         return [json.loads(linha) for linha in arquivo if linha.strip()]
-
-
-# --- base da EBD ---------------------------------------------------------------------
-
-
-def test_coleta_completa_grava_bruto_no_contrato_e_as_normalizadas(tmp_path):
-    destino = Destino(tmp_path)
-    resultado = pof.coletar(destino, cliente=TrendsFalso(), dormir=nunca_dorme)
-
-    assert resultado["status"] == "ok"
-    assert resultado["produtos"] == 10
-    particao = f"data_coleta={comum.hoje()}"
-    bruto = tmp_path / f"datasets/pof_trends/bruto/{particao}/produtos_confeitaria_popularidade_mensal.csv"
-    conteudo = bruto.read_bytes()
-    assert conteudo.startswith("﻿".encode("utf-8"))
-    assert b"\r\n" in conteudo and b"\n" not in conteudo.replace(b"\r\n", b"")
-    cabecalho = conteudo.decode("utf-8-sig").split("\r\n")[0].split(";")
-    assert cabecalho[:5] == ["produto_id", "produto_ibge", "termo_trends", "consumo_kg_sp", "data_coleta"]
-    assert cabecalho[-6:] == comum.METRICAS
-    meses = cabecalho[5:-6]
-    assert meses == sorted(meses) and all(len(m) == 7 and m[4] == "-" for m in meses)
-
-    resumo = ler_jsonl(tmp_path / f"datasets/pof_trends/resumo/{particao}/resumo.jsonl")
-    assert sorted(r["produto_id"] for r in resumo) == list(range(1, 11))
-    assert all(r["consumo_kg_sp"] > 0 and r["fator_sazonalidade"] >= 1 for r in resumo)
-    serie = ler_jsonl(tmp_path / f"datasets/pof_trends/serie/{particao}/serie.jsonl")
-    assert len(serie) == 10 * len(meses)
-    assert sum(1 for s in serie if s["mes_parcial"]) == 10
-    assert ler_jsonl(tmp_path / f"datasets/pof_trends/rejeicoes/{particao}/rejeicoes.jsonl") == []
-
-
-def test_termo_sem_dados_bloqueia_sem_gravar_a_coleta_e_registra_a_rejeicao(tmp_path):
-    destino = Destino(tmp_path)
-    resultado = pof.coletar(destino, cliente=TrendsFalso(sem_dados={"sorvete"}), dormir=nunca_dorme)
-
-    assert resultado["status"] == "falha"
-    assert "coleta externa" in resultado["motivo"]
-    assert all("/rejeicoes/" in chave for chave in destino.chaves)
-    rejeicoes = ler_jsonl(tmp_path / f"datasets/pof_trends/rejeicoes/data_coleta={comum.hoje()}/rejeicoes.jsonl")
-    assert rejeicoes[0]["produto"] == "Sorvete" and rejeicoes[0]["severidade"] == "bloqueante"
-
-
-def test_planilha_sem_a_aba_bloqueia_pela_regra_estrutural(tmp_path):
-    vazia = tmp_path / "pof.xlsx"
-    pd.DataFrame({"a": [1]}).to_excel(vazia, sheet_name="Outra", index=False)
-    resultado = pof.coletar(Destino(tmp_path), cliente=TrendsFalso(), dormir=nunca_dorme, caminho_pof=str(vazia))
-    assert resultado["status"] == "falha"
-    assert "[estrutural]" in resultado["motivo"]
-
-
-def test_categoria_sem_termo_no_mapa_bloqueia(tmp_path, monkeypatch):
-    # "Bolo" casa com a linha "Bolos" da POF, mas não é a chave exata do mapa.
-    categorias = dict(pof.CATEGORIAS)
-    categorias["Bolo"] = categorias.pop("Bolos")
-    monkeypatch.setattr(pof, "CATEGORIAS", categorias)
-    resultado = pof.coletar(Destino(tmp_path), cliente=TrendsFalso(), dormir=nunca_dorme)
-    assert resultado["status"] == "falha"
-    assert "[mapeamento]" in resultado["motivo"]
-
-
-def test_popularidade_media_zero_e_rejeitada(tmp_path):
-    class Zerado(TrendsFalso):
-        def interest_over_time(self):
-            df = super().interest_over_time()
-            if self.termo == "gelatina":
-                df[self.termo] = 0
-            return df
-
-    resultado = pof.coletar(Destino(tmp_path), cliente=Zerado(), dormir=nunca_dorme)
-    assert resultado["status"] == "falha"
-    assert "[negócio]" in resultado["motivo"]
-
-
-def test_prazo_curto_interrompe_antes_de_consultar(tmp_path):
-    cliente = TrendsFalso()
-    resultado = pof.coletar(Destino(tmp_path), comum.Prazo(lambda: 60_000), cliente=cliente, dormir=nunca_dorme)
-    assert resultado["status"] == "falha"
-    assert "prazo" in resultado["motivo"]
-    assert cliente.consultas == []
-
-
-def test_tres_tentativas_com_espera_crescente(tmp_path):
-    esperas = []
-    cliente = TrendsFalso(erro=RuntimeError("429"))
-    resultado = pof.coletar(Destino(tmp_path), cliente=cliente, dormir=esperas.append)
-    assert resultado["status"] == "falha"
-    assert cliente.consultas == ["pao doce"] * 3
-    assert esperas == [60, 120]
-
-
-def test_segunda_coleta_do_dia_substitui_a_primeira(tmp_path):
-    pof.coletar(Destino(tmp_path), cliente=TrendsFalso(valores={"bolo": 10}), dormir=nunca_dorme)
-    pof.coletar(Destino(tmp_path), cliente=TrendsFalso(valores={"bolo": 40}), dormir=nunca_dorme)
-    resumo = ler_jsonl(tmp_path / f"datasets/pof_trends/resumo/data_coleta={comum.hoje()}/resumo.jsonl")
-    assert len(resumo) == 10
-    assert not list(tmp_path.rglob("*.tmp"))
 
 
 # --- produtos do sistema -----------------------------------------------------------
@@ -257,6 +158,5 @@ def test_produto_repetido_na_api_bloqueia(tmp_path):
     assert resultado["status"] == "falha" and "[identificação]" in resultado["motivo"]
 
 
-@pytest.mark.parametrize("modulo", [pof, tendencias])
-def test_handler_existe_com_a_assinatura_da_lambda(modulo):
-    assert modulo.handler.__code__.co_varnames[:2] == ("event", "context")
+def test_handler_existe_com_a_assinatura_da_lambda():
+    assert tendencias.handler.__code__.co_varnames[:2] == ("event", "context")

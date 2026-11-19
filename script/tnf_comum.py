@@ -1,11 +1,8 @@
-"""Partes comuns das duas coletas do Tem Na Festa.
+"""Partes comuns da coleta de produtos ativos do Tem Na Festa e Google Trends.
 
-As duas bases (a da "Especificação de Base de Dados", POF/IBGE + Google
-Trends, e a dos produtos cadastrados no sistema) usam o mesmo cliente do
-Trends, as mesmas métricas, o mesmo registro de rejeições e as mesmas saídas:
-o arquivo bruto no contrato da EBD (seção 2.1) e as versões normalizadas em
-JSON Lines (resumo, série mensal e rejeições), gravadas numa pasta local ou no
-bucket bronze, sob a partição data_coleta.
+O coletor consulta o nome cadastrado no sistema, aplica as métricas e regras
+comuns, e grava o CSV bruto e as versões JSON Lines (resumo, série mensal e
+rejeições) numa pasta local ou no bucket bronze, sob a partição data_coleta.
 """
 
 import io

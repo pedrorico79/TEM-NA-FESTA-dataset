@@ -1,154 +1,59 @@
-# Analytics de Confeitaria: Consumo Real vs. Demanda Digital (SP)
+# Tendências dos produtos do sistema no Google Trends
 
-Este projeto gera um dataset para análise do mercado de confeitaria no Estado de
-São Paulo. O script combina dados de consumo da POF/IBGE com o interesse de busca
-dos últimos 12 meses no Google Trends.
+Este repositório coleta os produtos ativos do Tem na Festa pela API do backend e consulta o nome cadastrado de cada produto no Google Trends. O coletor não usa a planilha `aquisicao_alimentar_por_unidade_da_federacao.xls`; ela permanece apenas como arquivo histórico e não é incluída no pacote da Lambda.
 
-## Tecnologias utilizadas
+## Fluxo de dados
 
-- Python 3.10+
-- Pandas para leitura, limpeza e transformação dos dados
-- PyTrends para consulta ao Google Trends
-- xlrd para leitura da planilha `.xls` do IBGE
-- Requests para consumir a API do sistema
-- python-dotenv para carregar a configuração local
+1. A API do sistema devolve os produtos ativos (`id`, `nome` e `precoVenda`).
+2. O nome do produto é enviado ao Google Trends para São Paulo (`BR-SP`), sem mapeamento para uma categoria externa.
+3. O coletor grava o CSV bruto e as representações JSON Lines no layout bronze.
+4. A infraestrutura cadastra as tabelas no Glue e consulta os dados pelo Athena.
 
-## Estrutura do projeto
+## Arquivos principais
 
-```text
-.
-├── bases-externas/
-│   ├── aquisicao_alimentar_por_unidade_da_federacao.xls
-│   └── feriados_nacionais_2026.csv
-├── script/
-│   ├── script-tratamento-TNF.py
-│   └── script-tendencias-produtos-TNF.py
-├── arquivos-gerados/
-│   └── .gitkeep
-├── .env.example
-├── .gitignore
-└── README.md
-```
+- `script/tnf_tendencias.py`: coleta local e handler da Lambda.
+- `script/script-tendencias-produtos-TNF.py`: entrada recomendada para a coleta local.
+- `script/script-tratamento-TNF.py`: alias de compatibilidade que também executa a coleta dos produtos do sistema.
+- `arquivos-gerados/`: saídas locais, ignoradas pelo Git.
 
-A pasta `arquivos-gerados` é mantida no repositório pelo arquivo `.gitkeep`, mas
-os CSVs produzidos pelo script são ignorados pelo Git.
+## Execução local
 
-## Como executar
-
-Os comandos devem ser executados na pasta raiz do projeto.
-
-### 1. Criar o ambiente virtual
+Na raiz do projeto:
 
 ```bash
 python -m venv .venv
-```
-
-### 2. Ativar o ambiente virtual
-
-No PowerShell:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-No Git Bash:
-
-```bash
-source .venv/Scripts/activate
-```
-
-### 3. Instalar as dependências
-
-```bash
+source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
+cp .env.example .env
 ```
 
-### 4. Executar o script
-
-```bash
-python ./script/script-tratamento-TNF.py
-```
-
-A coleta possui intervalos entre as consultas e pode levar alguns minutos. Ao
-final, o seguinte arquivo será criado ou atualizado:
-
-```text
-arquivos-gerados/produtos_confeitaria_popularidade_mensal.csv
-```
-
-## Coleta dos produtos cadastrados no sistema
-
-O segundo script consulta os produtos ativos do backend e utiliza diretamente o
-nome cadastrado como termo de pesquisa no Google Trends.
-
-Copie `.env.example` para `.env` e preencha a URL e as credenciais locais. O
-arquivo `.env` contém informações sensíveis e é ignorado pelo Git.
-
-Com o backend em execução, rode:
+Preencha `TNF_API_URL`, `TNF_API_EMAIL` e `TNF_API_PASSWORD` no `.env`, com o backend disponível, e execute:
 
 ```bash
 python ./script/script-tendencias-produtos-TNF.py
 ```
 
-O resultado será salvo em:
+O arquivo bruto de conveniência será salvo em `arquivos-gerados/tendencias_produtos_sistema.csv`. O contrato bronze também grava:
 
 ```text
-arquivos-gerados/tendencias_produtos_sistema.csv
+arquivos-gerados/datasets/tendencias_produtos/
+├── bruto/env=local/data_coleta=AAAA-MM-DD/tendencias_produtos_sistema.csv
+├── resumo/env=local/data_coleta=AAAA-MM-DD/resumo.jsonl
+├── serie/env=local/data_coleta=AAAA-MM-DD/serie.jsonl
+└── rejeicoes/env=local/data_coleta=AAAA-MM-DD/rejeicoes.jsonl
 ```
 
-Produtos inativos não são coletados. Um produto sem retorno no Google Trends é
-registrado no log e ignorado, permitindo que os demais sejam processados. O log
-da execução fica em `arquivos-gerados/pipeline-tendencias.log`.
+`serie.jsonl` tem uma linha por produto e mês; `resumo.jsonl` tem métricas por produto. Produtos sem dados suficientes no Trends ficam em rejeições como aviso e não interrompem os demais.
 
-O novo CSV possui exatamente 12 colunas mensais: o mês atual, ainda parcial, e
-os 11 meses anteriores.
+## Execução na AWS
 
-## Dados gerados
+A Lambda `tnf-<env>-tendencias` coleta os produtos ativos pela API do backend, lê email e senha do SSM e grava o mesmo layout no bucket bronze. O Glue cataloga `tendencias_produtos_resumo`, `tendencias_produtos_serie` e `tendencias_produtos_rejeicoes`; o Athena disponibiliza a visão `vw_tendencias_produtos_atual`.
 
-O CSV contém:
+Na infraestrutura, rode `infra dataset run dev` ou `infra dataset run prod` para iniciar uma coleta, conforme o ambiente. `infra analytics up` configura o Glue e o Athena; não executa uma coleta.
 
-- produto e consumo per capita em São Paulo, segundo a POF/IBGE;
-- popularidade mensal do termo no Google Trends;
-- média e pico de popularidade;
-- mês de maior interesse;
-- fator de sazonalidade;
-- evento comercial associado ao mês de pico.
+## Google Trends e limites
 
-O fator de sazonalidade é calculado dividindo a popularidade de pico pela
-popularidade média do produto.
-
-## Falhas do Google Trends
-
-O PyTrends utiliza uma interface não oficial e o Google pode limitar as consultas
-temporariamente, retornando o erro `429`. Nessa situação, o script faz até três
-tentativas com intervalos progressivos.
-
-Se todas as tentativas falharem, a execução é interrompida e o CSV existente não
-é substituído por um resultado incompleto. Aguarde alguns minutos antes de tentar
-novamente.
-
-## Validação e rejeições
-
-As duas coletas aplicam as regras de validação da "Especificação de Base de
-Dados" (seção 4.2): estrutural, identificação, domínio, integridade, temporal,
-mapeamento, negócio e coleta externa. Na base da POF todas são bloqueantes: se
-uma falhar, nada é gravado e o CSV anterior fica intacto. Na base dos produtos
-do sistema, um produto sem dados no Google Trends não bloqueia; ele vai para as
-rejeições como aviso. Cada execução grava também o arquivo de rejeições
-(`rejeicoes.jsonl`), com produto, regra, motivo, severidade e data.
-
-Além do CSV de antes, a execução grava em `arquivos-gerados/datasets/` o mesmo
-layout usado na AWS: o arquivo bruto, o resumo e a série mensal em JSON Lines,
-sob a partição `data_coleta=AAAA-MM-DD`.
-
-## Execução na AWS (Lambda)
-
-A lógica fica nos módulos `script/tnf_pof_trends.py` e `script/tnf_tendencias.py`,
-cada um com o `main()` da execução local e um `handler(event, context)` para a
-Lambda. A infraestrutura (`TEM-NA-FESTA-infraestrutura`, spec 10) empacota este
-repositório numa tag fixa, com as dependências de `requirements-lambda.txt`, e
-grava as coletas no bucket bronze. Na Lambda, a URL da API vem de variável de
-ambiente e o email e a senha vêm do SSM, nunca de `.env`.
+O PyTrends usa uma interface não oficial. Se o Google limitar consultas com erro 429, o coletor tenta novamente com pausas progressivas. Um produto sem dados suficientes é registrado como aviso; falhas na API, produtos duplicados ou estrutura inválida bloqueiam a coleta.
 
 ## Testes
 
@@ -156,5 +61,4 @@ ambiente e o email e a senha vêm do SSM, nunca de `.env`.
 python -m pytest tests
 ```
 
-Os testes não usam a rede: o Google Trends e a API são simulados, e a planilha
-da POF é a de `bases-externas/`.
+Os testes simulam a API e o Google Trends; não fazem chamadas externas.
