@@ -242,15 +242,77 @@ def handler(event, context):
         real = context.get_remaining_time_in_millis()
         return min(real, limite * 1000) if limite is not None else real
 
+    ambiente = os.environ["TNF_ENV"]
     prefixo = os.environ["TNF_SSM_PREFIX"].rstrip("/")
-    resultado = coletar(
-        comum.DestinoS3(os.environ["TNF_BRONZE_BUCKET"]),
-        os.environ["TNF_API_URL"].rstrip("/"),
-        comum.ler_ssm(f"{prefixo}/dataset_api_email"),
-        comum.ler_ssm(f"{prefixo}/dataset_api_password"),
-        os.environ["TNF_ENV"],
-        comum.Prazo(restante_ms),
+    destino = comum.DestinoS3(os.environ["TNF_BRONZE_BUCKET"])
+    inicio = pd.Timestamp.now(tz=comum.FUSO)
+    execucao_id = f"{ambiente}-{inicio.strftime('%Y%m%dT%H%M%S%z')}-{context.aws_request_id}"
+    eventos = []
+
+    class CapturaLogs(logging.Handler):
+        def emit(self, registro):
+            instante = pd.Timestamp(registro.created, unit="s", tz="UTC").tz_convert(comum.FUSO)
+            mensagem = registro.getMessage()
+            etapa = mensagem[1:].split("]", 1)[0] if mensagem.startswith("[") and "]" in mensagem else "geral"
+            eventos.append({
+                "timestamp": instante.isoformat(timespec="seconds"),
+                "execucao_id": execucao_id,
+                "nivel": registro.levelname,
+                "etapa": etapa,
+                "mensagem": mensagem,
+            })
+
+    captura = CapturaLogs()
+    logger.addHandler(captura)
+    try:
+        resultado = coletar(
+            destino,
+            os.environ["TNF_API_URL"].rstrip("/"),
+            comum.ler_ssm(f"{prefixo}/dataset_api_email"),
+            comum.ler_ssm(f"{prefixo}/dataset_api_password"),
+            ambiente,
+            comum.Prazo(restante_ms),
+        )
+    except Exception as erro:
+        # Guarda só o tipo da exceção para não levar dados sensíveis aos logs.
+        logger.error("[execucao] falha inesperada: %s", erro.__class__.__name__)
+        resultado = {
+            "status": "falha",
+            "base": BASE,
+            "ambiente": ambiente,
+            "data_coleta": comum.hoje(),
+            "motivo": erro.__class__.__name__,
+            "rejeicoes": 0,
+        }
+    finally:
+        logger.removeHandler(captura)
+
+    fim = pd.Timestamp.now(tz=comum.FUSO)
+    resumo = {
+        "execucao_id": execucao_id,
+        "inicio": inicio.isoformat(timespec="seconds"),
+        "fim": fim.isoformat(timespec="seconds"),
+        "status": resultado.get("status", "falha"),
+        "data_coleta": resultado.get("data_coleta"),
+        "produtos_catalogo": resultado.get("produtos_catalogo"),
+        "produtos_ativos": resultado.get("produtos_ativos"),
+        "produtos_inativos": resultado.get("produtos_inativos"),
+        "produtos_com_dados": resultado.get("produtos_com_dados"),
+        "rejeicoes": resultado.get("rejeicoes"),
+        "duracao_segundos": round((fim - inicio).total_seconds(), 2),
+        "motivo": resultado.get("motivo", ""),
+    }
+    particao = f"env={ambiente}/year={inicio.year}/month={inicio.month:02d}/day={inicio.day:02d}"
+    destino.gravar(
+        f"monitoramento/execucoes/{particao}/{execucao_id}.jsonl",
+        comum.jsonl([resumo]),
     )
+    if eventos:
+        destino.gravar(
+            f"monitoramento/eventos/{particao}/{execucao_id}.jsonl",
+            comum.jsonl(eventos),
+        )
+
     logger.info("Resultado: %s", resultado)
     return resultado
 

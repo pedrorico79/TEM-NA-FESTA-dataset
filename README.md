@@ -49,7 +49,7 @@ arquivos-gerados/datasets/tendencias_produtos/
 
 ## Execução na AWS
 
-A Lambda `tnf-<env>-tendencias` coleta os produtos ativos pela API do backend, lê email e senha do SSM e grava o mesmo layout no bucket bronze. O Glue atualmente cataloga `tendencias_produtos_resumo`, `tendencias_produtos_serie` e `tendencias_produtos_rejeicoes`. Antes de publicar esta alteração na AWS, a infraestrutura deve atualizar os schemas Glue para `produto_ativo` e cadastrar o novo caminho `catalogo`; o Athena disponibiliza a visão `vw_tendencias_produtos_atual`.
+A Lambda `tnf-<env>-tendencias` coleta os produtos ativos e inativos não deletados pela API do backend, lê email e senha do SSM e grava o mesmo layout no bucket bronze. Ela também grava o resumo da execução e seus eventos em JSONL sob `monitoramento/{execucoes,eventos}/`, para consulta no Athena. O Glue cataloga as tabelas do catálogo, das métricas Trends, das rejeições e do monitoramento; o Athena disponibiliza a visão `vw_tendencias_produtos_atual`.
 
 Na infraestrutura, rode `infra dataset run dev` ou `infra dataset run prod` para iniciar uma coleta, conforme o ambiente. `infra analytics up` configura o Glue e o Athena; não executa uma coleta.
 
@@ -61,7 +61,7 @@ Os produtos são consultados em lotes com uma referência comum (`TNF_TRENDS_REF
 
 ## Saídas locais para Grafana
 
-A execução local também acumula `arquivos-gerados/monitoramento/execucoes_coleta.csv` e `eventos_coleta.csv`. Esses arquivos registram início/fim, status, ambiente, duração, quantidade de produtos ativos/inativos, nível, etapa e mensagem, sem gravar credenciais.
+A execução local acumula `arquivos-gerados/monitoramento/execucoes_coleta.csv` e `eventos_coleta.csv`. Na AWS, a Lambda grava o equivalente em JSONL no S3 Bronze. Os registros incluem início/fim, status, ambiente, duração, quantidades de produtos ativos/inativos, nível, etapa e mensagem, sem gravar credenciais.
 
 ## Google Trends e limites
 
